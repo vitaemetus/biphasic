@@ -1,15 +1,14 @@
 ﻿/*
    Code for Microcanonical Molecular Dynamics simulation of a Lennard-Jones
-   system in a periodic boundary
+   biphasic system in a periodic boundary
 
-   Written by Vladislav Negodin
+   Written by Vladislav Negodin and modified by Danya and Egor
 
    Based.
    And based on C code by Cameron F. Abrams, 2004
 
    compile using "g++ -o mdlj mdlj.cpp"
 */
-
 #define _USE_MATH_DEFINES
 
 #include <iostream>
@@ -27,6 +26,8 @@ struct Particle {
     double vx = 0, vy = 0, vz = 0;
     double ax = 0, ay = 0, az = 0;
     double image_x = 0, image_y = 0, image_z = 0;
+    unsigned type = 1;
+    double eps;
 };
 
 struct ForceOutput{
@@ -36,14 +37,28 @@ struct ForceOutput{
 
 struct SystemOptions {
     unsigned particles_number = 216;
-    double density = 0.5;
-    double box_size;
+    double density = 0.47;
+    
+    double x_box_size;
+    double y_box_size;
+    double z_box_size;
+
+    double x_lattice_size = 3;
+    double y_lattice_size = 3;
+    double z_lattice_size = 1;
+
+    unsigned n1 = 108;
+    unsigned n2 = 108;
+
+    double eps1 = 5;
+    double eps2 = 1;
+
     double T0 = 1.0;
     bool lang = false;
     double Tl = T0;
     double gamma = 5.0;
     unsigned seed = time(NULL);
-    double cutoff_radius = 1.0e6;
+    double cutoff_radius = 6.78;
     double energy_cut;
     double energy_correction = 0.0;
     double dt = 0.001;
@@ -70,6 +85,13 @@ void PrintUsageInfo() {
     cout << "Options:" << endl;
     cout << "\t -N [integer]         Number of particles" << endl;
     cout << "\t -rho [real]          Number density" << endl;
+
+    cout << "\t -N{x,y} [integer]    Lattice dimensions" << endl;
+
+    cout << "\t -n{1,2} [integer]    Number of particles of chosen type" << endl;
+
+    cout << "\t -eps{1,2} [real]     Energy constant for the particles of chosen type" << endl;
+
     cout << "\t -dt [real]           Time step" << endl;
     cout << "\t -rc [real]           Cutoff radius" << endl;
     cout << "\t -ns [real]           Number of integration steps" << endl;
@@ -101,6 +123,17 @@ SystemOptions ParseCommandLineArguments(int argc, char** argv) {
         string arg_str = argv[arg_index];
         if (arg_str == "-N") options.particles_number = atoi(argv[++arg_index]);
         else if (arg_str == "-rho") options.density = atof(argv[++arg_index]);
+
+        else if (arg_str == "-Nx") options.x_lattice_size = atoi(argv[++arg_index]);
+        else if (arg_str == "-Ny") options.y_lattice_size = atoi(argv[++arg_index]);
+        else if (arg_str == "-Nz") options.z_lattice_size = atoi(argv[++arg_index]);
+
+        else if (arg_str == "-n1") options.n1 = atoi(argv[++arg_index]);
+        else if (arg_str == "-n2") options.n2 = atoi(argv[++arg_index]);
+
+        else if (arg_str == "-eps1") options.eps1 = atof(argv[++arg_index]);
+        else if (arg_str == "-eps2") options.eps2 = atof(argv[++arg_index]);
+
         else if (arg_str == "-dt") options.dt = atof(argv[++arg_index]);
         else if (arg_str == "-rc") options.cutoff_radius = atof(argv[++arg_index]);
         else if (arg_str == "-ns") options.steps_number = atoi(argv[++arg_index]);
@@ -142,11 +175,11 @@ vector<Particle> ReadParticlesXYZ(ifstream& in_file, SystemOptions& options) {
     //    Lattice="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0"
     // And just get box_size from here
     string rubbish;
-    in_file >> rubbish >> options.box_size;
+    in_file >> rubbish >> options.x_box_size;
     getline(in_file, rubbish);
 
     options.density = options.particles_number / 
-        (options.box_size * options.box_size * options.box_size);
+        (options.x_box_size * options.y_box_size * options.z_box_size);
 
     vector<Particle> particles;
     for (int index = 0; index < options.particles_number; ++index) {
@@ -171,20 +204,21 @@ vector<Particle> ReadParticlesXYZ(ifstream& in_file, SystemOptions& options) {
 void WriteParticlesXYZ(ofstream& out_file, const vector<Particle>& particles, 
                        const SystemOptions& options, double time) {
     out_file << options.particles_number << endl;
-    out_file << "Lattice=\" " << options.box_size << " 0.0 0.0 0.0 "
-        << options.box_size << " 0.0 0.0 0.0 " << options.box_size << " \"";
+    out_file << "Lattice=\" " << options.x_box_size << " 0.0 0.0 0.0 "
+        << options.y_box_size << " 0.0 0.0 0.0 " << options.z_box_size << " \"";
     if (options.read_and_print_with_velocity) {
-        out_file << " Properties=pos:R:3:velo:R:3";
+        out_file << " Properties=type:pos:R:3:velo:R:3";
     }
     else {
         out_file << " Properties=pos:R:3";
     }
     out_file << " Time = " << time << endl;
     for (const auto& particle : particles) {
+        out_file << particle.type << " ";
         if (options.print_unfolded_coordinates) {
-            out_file << particle.x + particle.image_x * options.box_size << " "
-                << particle.y + particle.image_y * options.box_size << " "
-                << particle.z + particle.image_z * options.box_size;
+            out_file << particle.x + particle.image_x * options.x_box_size << " "
+                << particle.y + particle.image_y * options.x_box_size << " "
+                << particle.z + particle.image_z * options.x_box_size;
         }
         else {
             out_file << particle.x << " " << particle.y << " " << particle.z;
@@ -198,27 +232,28 @@ void WriteParticlesXYZ(ofstream& out_file, const vector<Particle>& particles,
     }
 }
 
-vector<Particle> GeneratePositions(const SystemOptions& options) {
-    // Find the lowest perfect cube, n3, greater than or equal to the number of particles
-    int lattice_size = 2;
-    while (lattice_size * lattice_size * lattice_size < options.particles_number) {
-        lattice_size++;
+void GenerateLattice(SystemOptions& options){
+    // Find the minimal lattice height
+    while (options.x_lattice_size * options.y_lattice_size * options.z_lattice_size < options.particles_number) {
+        options.z_lattice_size++;
     }
+}
 
-    // Generate particles in simple cubic (sc) lattice
+vector<Particle> GeneratePositions(SystemOptions& options) {
+    // Generate particles and assign ccordinates according to their lattice nodes
     vector<Particle> particles;
     int index_x = 0, index_y = 0, index_z = 0;
     for (int index = 0; index < options.particles_number; ++index) {
         Particle new_particle;
-        new_particle.x = ((double)index_x + 0.5) * options.box_size / lattice_size;
-        new_particle.y = ((double)index_y + 0.5) * options.box_size / lattice_size;
-        new_particle.z = ((double)index_z + 0.5) * options.box_size / lattice_size;
+        new_particle.x = ((double)index_x + 0.5) * options.x_box_size / options.x_lattice_size;
+        new_particle.y = ((double)index_y + 0.5) * options.y_box_size / options.y_lattice_size;
+        new_particle.z = ((double)index_z + 0.5) * options.z_box_size / options.z_lattice_size;
 
         index_x++;
-        if (index_x == lattice_size) {
+        if (index_x == options.x_lattice_size) {
             index_x = 0;
             index_y++;
-            if (index_y == lattice_size) {
+            if (index_y == options.y_lattice_size) {
                 index_y = 0;
                 index_z++;
             }
@@ -228,6 +263,25 @@ vector<Particle> GeneratePositions(const SystemOptions& options) {
     }
 
     return particles;
+}
+
+void GenerateTypes(vector<Particle>& particles, const SystemOptions& options, mt19937& rng){
+    // Generate a vector of consecutive indexes and shuffle them
+    vector<int> indexes;
+    for(int i = 0; i < options.particles_number; i++) {indexes.push_back(i);}
+    shuffle(indexes.begin(), indexes.end(), rng);
+    
+    // Now we take first n1 indexes and assign type 1 to particles with those indexes
+    for (int i = 0; i < options.n1; i++){
+        particles[indexes[i]].type = 1;
+        particles[indexes[i]].eps = options.eps1;
+    }
+
+    // Same thing with type 2
+    for (int i = options.n1; i < options.particles_number; i++){
+        particles[indexes[i]].type = 2;
+        particles[indexes[i]].eps = options.eps2;
+    }
 }
 
 void GenerateVelocities(vector<Particle>& particles, const SystemOptions& options, mt19937& rng) {
@@ -278,7 +332,9 @@ ForceOutput ComputeForcesAndPotentialEnergy(vector<Particle>& particles, const S
 
     ForceOutput output;
 
-    double half_box_size = options.box_size / 2;
+    double x_half_box_size = options.x_box_size / 2;
+    double y_half_box_size = options.y_box_size / 2;
+    double z_half_box_size = options.z_box_size / 2;
     double squared_cutoff = options.cutoff_radius * options.cutoff_radius;
 
     for (int i = 0; i < options.particles_number - 1; ++i) {
@@ -289,32 +345,34 @@ ForceOutput ComputeForcesAndPotentialEnergy(vector<Particle>& particles, const S
 
             // Periodic boundary conditions: Apply the minimum image convention; note that
             // this is *not* used to truncate the potential as long as there an explicit cutoff.
-            if (delta_x > half_box_size) {
-                delta_x -= options.box_size;
+            if (delta_x > x_half_box_size) {
+                delta_x -= options.x_box_size;
             }
-            else if (delta_x < -half_box_size) {
-                delta_x += options.box_size;
+            else if (delta_x < -x_half_box_size) {
+                delta_x += options.x_box_size;
             }
-            if (delta_y > half_box_size) {
-                delta_y -= options.box_size;
+            if (delta_y > y_half_box_size) {
+                delta_y -= options.y_box_size;
             }
-            else if (delta_y < -half_box_size) {
-                delta_y += options.box_size;
+            else if (delta_y < -y_half_box_size) {
+                delta_y += options.y_box_size;
             }
-            if (delta_z > half_box_size) {
-                delta_z -= options.box_size;
+            if (delta_z > z_half_box_size) {
+                delta_z -= options.z_box_size;
             }
-            else if (delta_z < -half_box_size) {
-                delta_z += options.box_size;
+            else if (delta_z < -z_half_box_size) {
+                delta_z += options.z_box_size;
             }
 
             double squared_distance = delta_x * delta_x + delta_y * delta_y + delta_z * delta_z;
 
             if (squared_distance < squared_cutoff) {
                 double distance_pow_6 = 1 / (squared_distance * squared_distance * squared_distance);
-                output.potential_energy += 4 * (distance_pow_6 * distance_pow_6 - distance_pow_6) 
-                    - options.energy_cut;
-                double force = 48 * (distance_pow_6 * distance_pow_6 - 0.5 * distance_pow_6);
+                output.potential_energy += 4 * sqrt(particles[i].eps * particles[j].eps) 
+                                             * (distance_pow_6 * distance_pow_6 - distance_pow_6) 
+                                             - options.energy_cut;
+                double force = 48 * sqrt(particles[i].eps * particles[j].eps) 
+                                  * (distance_pow_6 * distance_pow_6 - 0.5 * distance_pow_6);
 
                 particles[i].ax += delta_x * force / squared_distance;
                 particles[j].ax -= delta_x * force / squared_distance;
@@ -340,27 +398,27 @@ ForceOutput ComputeForcesAndPotentialEnergy(vector<Particle>& particles, const S
 void ApplyPeriodicBoundaryConditions(vector<Particle>& particles, const SystemOptions& options) {
     for (auto& particle : particles) {
         if (particle.x < 0.0) {
-            particle.x += options.box_size;
+            particle.x += options.x_box_size;
             particle.image_x--;
         }
-        else if (particle.x > options.box_size) {
-            particle.x -= options.box_size;
+        else if (particle.x > options.x_box_size) {
+            particle.x -= options.x_box_size;
             particle.image_x++;
         }
         if (particle.y < 0.0) {
-            particle.y += options.box_size;
+            particle.y += options.y_box_size;
             particle.image_y--;
         }
-        else if (particle.y > options.box_size) {
-            particle.y -= options.box_size;
+        else if (particle.y > options.y_box_size) {
+            particle.y -= options.y_box_size;
             particle.image_y++;
         }
         if (particle.z < 0.0) {
-            particle.z += options.box_size;
+            particle.z += options.z_box_size;
             particle.image_z--;
         }
-        else if (particle.z > options.box_size) {
-            particle.z -= options.box_size;
+        else if (particle.z > options.z_box_size) {
+            particle.z -= options.z_box_size;
             particle.image_z++;
         }
     }
@@ -401,7 +459,11 @@ void Berendsen(vector <Particle>& particles, double T, const SystemOptions& opti
 
 int main(int argc, char* argv[]) {
     SystemOptions options = ParseCommandLineArguments(argc, argv);
-    options.box_size = cbrt(options.particles_number / options.density);
+    GenerateLattice(options);
+    options.x_box_size = options.x_lattice_size / cbrt(options.density);
+    options.y_box_size = options.y_lattice_size / cbrt(options.density);
+    options.z_box_size = options.z_lattice_size / cbrt(options.density);
+
     double rr3 = 1 / (options.cutoff_radius * options.cutoff_radius * options.cutoff_radius);
     options.energy_cut = 4 * (rr3 * rr3 * rr3 * rr3 - rr3 * rr3);
     if (options.use_energy_correction) {
@@ -414,7 +476,7 @@ int main(int argc, char* argv[]) {
 
     // Output some initial information
     cout << "# NVE MD Simulation of a Lennard - Jones fluid" << endl;
-    cout << "# L = " << options.box_size << " rho = " << options.density << " N = "
+    cout << "# Lx = " << options.x_box_size << " Ly = " << options.y_box_size << " Lz = " << options.z_box_size << " rho = " << options.density << " N = "
         << options.particles_number << " r_cut = " << options.cutoff_radius << endl;
     cout << "# Steps number = " << options.steps_number << " seed = " << options.seed 
         << " dt = " << options.dt << endl;
@@ -437,6 +499,9 @@ int main(int argc, char* argv[]) {
         particles = GeneratePositions(options);
         GenerateVelocities(particles, options, rng);
     }
+    GenerateTypes(particles, options, rng);\
+
+
     vector<Particle> particles_0 = particles;
 
     // Initial output to file
@@ -494,14 +559,14 @@ int main(int argc, char* argv[]) {
 
             
             if (options.msd_on && (step>=options.msd_start)){
-                options.msd += (particle.x + particle.image_x * options.box_size - (particles_0[i].x + particles_0[i].image_x * options.box_size)) * 
-                               (particle.x + particle.image_x * options.box_size - (particles_0[i].x + particles_0[i].image_x * options.box_size)) +
+                options.msd += (particle.x + particle.image_x * options.x_box_size - (particles_0[i].x + particles_0[i].image_x * options.x_box_size)) * 
+                               (particle.x + particle.image_x * options.x_box_size - (particles_0[i].x + particles_0[i].image_x * options.x_box_size)) +
 
-                               (particle.y + particle.image_y * options.box_size - (particles_0[i].y + particles_0[i].image_y * options.box_size)) * 
-                               (particle.y + particle.image_y * options.box_size - (particles_0[i].y + particles_0[i].image_y * options.box_size)) +
+                               (particle.y + particle.image_y * options.y_box_size - (particles_0[i].y + particles_0[i].image_y * options.y_box_size)) * 
+                               (particle.y + particle.image_y * options.y_box_size - (particles_0[i].y + particles_0[i].image_y * options.y_box_size)) +
 
-                               (particle.z + particle.image_z * options.box_size - (particles_0[i].z + particles_0[i].image_z * options.box_size)) * 
-                               (particle.z + particle.image_z * options.box_size - (particles_0[i].z + particles_0[i].image_z * options.box_size));
+                               (particle.z + particle.image_z * options.z_box_size - (particles_0[i].z + particles_0[i].image_z * options.z_box_size)) * 
+                               (particle.z + particle.image_z * options.z_box_size - (particles_0[i].z + particles_0[i].image_z * options.z_box_size));
             }
 
             i += 1;
